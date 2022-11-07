@@ -277,6 +277,14 @@ STATIC mp_uint_t ussl_socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t a
         ssl_free(self->ssl_sock);
         ssl_ctx_free(self->ssl_ctx);
         self->ssl_sock = NULL;
+    } else if (request == MP_STREAM_POLL) {
+        /* For POLL_RD, first check if we have bytes available... */
+        if (arg & MP_STREAM_POLL_RD) {
+            if (self->bytes_left > 0) {
+                return MP_STREAM_POLL_RD;
+            }
+        }
+        /* ...otherwise fall through to pass request to underlying socket */
     }
     // Pass all requests down to the underlying socket
     return mp_get_stream(self->sock)->ioctl(self->sock, request, arg, errcode);
