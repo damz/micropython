@@ -46,6 +46,8 @@
 #include "mbedtls/debug.h"
 #include "mbedtls/error.h"
 
+#define MP_STREAM_POLL_RDWR (MP_STREAM_POLL_RD | MP_STREAM_POLL_WR)
+
 typedef struct _mp_obj_ssl_socket_t {
     mp_obj_base_t base;
     mp_obj_t sock;
@@ -56,6 +58,8 @@ typedef struct _mp_obj_ssl_socket_t {
     mbedtls_x509_crt cacert;
     mbedtls_x509_crt cert;
     mbedtls_pk_context pkey;
+
+    uintptr_t poll_mask; // Indicates which read or write operations the protocol needs next
 } mp_obj_ssl_socket_t;
 
 struct ssl_args {
@@ -165,6 +169,7 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     #endif
     o->base.type = &ussl_socket_type;
     o->sock = sock;
+    o->poll_mask = 0;
 
     int ret;
     mbedtls_ssl_init(&o->ssl);
@@ -306,6 +311,7 @@ STATIC void socket_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kin
 
 STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errcode) {
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
+    o->poll_mask = 0;
 
     int ret = mbedtls_ssl_read(&o->ssl, buf, size);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
@@ -322,6 +328,7 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
         // wanting to write next handshake message. The same may happen with
         // renegotation.
         ret = MP_EWOULDBLOCK;
+        o->poll_mask = MP_STREAM_POLL_WR;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -329,6 +336,7 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
 
 STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, int *errcode) {
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
+    o->poll_mask = 0;
 
     int ret = mbedtls_ssl_write(&o->ssl, buf, size);
     if (ret >= 0) {
@@ -341,6 +349,7 @@ STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, in
         // wanting to read next handshake message. The same may happen with
         // renegotation.
         ret = MP_EWOULDBLOCK;
+        o->poll_mask = MP_STREAM_POLL_RD;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -372,6 +381,10 @@ STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, i
             if (mbedtls_ssl_get_bytes_avail(&self->ssl) > 0) {
                 return MP_STREAM_POLL_RD;
             }
+        }
+        /* If the library signaled us that it needs reading or writing, enforce that */
+        if (self->poll_mask && (arg & MP_STREAM_POLL_RDWR)) {
+            arg = (arg & ~MP_STREAM_POLL_RDWR) | self->poll_mask;
         }
         /* ...otherwise fall through to pass request to underlying socket */
     }
