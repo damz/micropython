@@ -66,6 +66,9 @@ struct ssl_args {
     mp_arg_val_t cert_reqs;
     mp_arg_val_t cadata;
     mp_arg_val_t do_handshake;
+    mp_arg_val_t dtls;
+    mp_arg_val_t psk_identity;
+    mp_arg_val_t psk_key;
 };
 
 STATIC const mp_obj_type_t ussl_socket_type;
@@ -187,7 +190,7 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
 
     ret = mbedtls_ssl_config_defaults(&o->conf,
         args->server_side.u_bool ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
-        MBEDTLS_SSL_TRANSPORT_STREAM,
+        args->dtls.u_bool ? MBEDTLS_SSL_TRANSPORT_DATAGRAM : MBEDTLS_SSL_TRANSPORT_STREAM,
         MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         goto cleanup;
@@ -198,6 +201,19 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     #ifdef MBEDTLS_DEBUG_C
     mbedtls_ssl_conf_dbg(&o->conf, mbedtls_debug, NULL);
     #endif
+
+    if (args->psk_identity.u_obj != mp_const_none && args->psk_key.u_obj != mp_const_none) {
+        size_t id_len;
+        size_t psk_len;
+        const byte *id = (const byte *)mp_obj_str_get_data(args->psk_identity.u_obj, &id_len);
+        const byte *psk = (const byte *)mp_obj_str_get_data(args->psk_key.u_obj, &psk_len);
+        // len should include terminating null
+        ret = mbedtls_ssl_conf_psk(&o->conf, (const unsigned char *) psk, psk_len, (const unsigned char *) id, id_len);
+        if (ret != 0) {
+            ret = MBEDTLS_ERR_PK_BAD_INPUT_DATA; // use general error for all key errors
+            goto cleanup;
+        }
+    }
 
     ret = mbedtls_ssl_setup(&o->ssl, &o->conf);
     if (ret != 0) {
@@ -412,6 +428,9 @@ STATIC mp_obj_t mod_ssl_wrap_socket(size_t n_args, const mp_obj_t *pos_args, mp_
         { MP_QSTR_cert_reqs, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = MBEDTLS_SSL_VERIFY_NONE}},
         { MP_QSTR_cadata, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
         { MP_QSTR_do_handshake, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = true} },
+        { MP_QSTR_dtls, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = false} },
+        { MP_QSTR_psk_identity, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_psk_key, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
     };
 
     // TODO: Check that sock implements stream protocol
