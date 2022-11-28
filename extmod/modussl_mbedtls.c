@@ -49,6 +49,8 @@
 #include "mbedtls/debug.h"
 #include "mbedtls/error.h"
 
+#define MP_STREAM_POLL_RDWR (MP_STREAM_POLL_RD | MP_STREAM_POLL_WR)
+
 typedef struct _mp_obj_ssl_socket_t {
     mp_obj_base_t base;
     mp_obj_t sock;
@@ -59,6 +61,9 @@ typedef struct _mp_obj_ssl_socket_t {
     mbedtls_x509_crt cacert;
     mbedtls_x509_crt cert;
     mbedtls_pk_context pkey;
+
+    uintptr_t poll_mask; // Indicates which read or write operations the protocol needs next
+
     #ifdef MBEDTLS_SSL_PROTO_DTLS
     mp_uint_t timer_start_ms;
     mp_int_t timer_fin_ms;
@@ -210,6 +215,7 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     #endif
     o->base.type = &ussl_socket_type;
     o->sock = sock;
+    o->poll_mask = 0;
 
     int ret;
     mbedtls_ssl_init(&o->ssl);
@@ -373,6 +379,7 @@ STATIC void socket_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kin
 
 STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errcode) {
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
+    o->poll_mask = 0;
 
     int ret = mbedtls_ssl_read(&o->ssl, buf, size);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
@@ -389,6 +396,7 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
         // wanting to write next handshake message. The same may happen with
         // renegotation.
         ret = MP_EWOULDBLOCK;
+        o->poll_mask = MP_STREAM_POLL_WR;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -396,6 +404,7 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
 
 STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, int *errcode) {
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
+    o->poll_mask = 0;
 
     int ret = mbedtls_ssl_write(&o->ssl, buf, size);
     if (ret >= 0) {
@@ -408,6 +417,7 @@ STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, in
         // wanting to read next handshake message. The same may happen with
         // renegotation.
         ret = MP_EWOULDBLOCK;
+        o->poll_mask = MP_STREAM_POLL_RD;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -433,8 +443,44 @@ STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, i
         mbedtls_ssl_config_free(&self->conf);
         mbedtls_ctr_drbg_free(&self->ctr_drbg);
         mbedtls_entropy_free(&self->entropy);
+    } else if (request == MP_STREAM_POLL) {
+        if ((arg & MP_STREAM_POLL_RDWR) && (_mbedtls_timing_get_delay(self) >= 1)) {
+            return arg & MP_STREAM_POLL_RDWR;
+        }
+
+        // If the library signaled us that it needs reading or writing, only check that direction,
+        // but save what the caller asked because we need to restore it later
+        int saved_arg = 0;
+        if (self->poll_mask && (arg & MP_STREAM_POLL_RDWR)) {
+            saved_arg = arg & MP_STREAM_POLL_RDWR;
+            arg = ~saved_arg | self->poll_mask;
+        }
+
+        // Take into account that the library might have buffered data already
+        int has_pending = 0;
+        if (arg & MP_STREAM_POLL_RD) {
+            has_pending = mbedtls_ssl_check_pending(&self->ssl);
+            if (has_pending && arg == MP_STREAM_POLL_RD) {
+                // Shortcut if we only need to read and we have buffered data, no need to go to the underlying socket
+                return MP_STREAM_POLL_RD;
+            }
+        }
+
+        // ...otherwise fall through to pass request to underlying socket
+        mp_uint_t ret = mp_get_stream(self->sock)->ioctl(self->sock, request, arg, errcode);
+
+        if (has_pending) {
+            ret |= MP_STREAM_POLL_RD;
+        }
+
+        // The direction the library needed is available, return a fake result to the caller so that
+        // it reenters a read or a write to allow the handshake to progress
+        if (ret & self->poll_mask) {
+            ret |= saved_arg;
+        }
+        return ret;
     }
-    // Pass all requests down to the underlying socket
+    // Pass all other requests down to the underlying socket
     return mp_get_stream(self->sock)->ioctl(self->sock, request, arg, errcode);
 }
 
