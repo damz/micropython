@@ -75,6 +75,8 @@ struct ssl_args {
     mp_arg_val_t cadata;
     mp_arg_val_t do_handshake;
     mp_arg_val_t dtls;
+    mp_arg_val_t psk_identity;
+    mp_arg_val_t psk_key;
 };
 
 STATIC const mp_obj_type_t ussl_socket_type;
@@ -240,6 +242,22 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     mbedtls_ssl_conf_rng(&o->conf, mbedtls_ctr_drbg_random, &o->ctr_drbg);
     #ifdef MBEDTLS_DEBUG_C
     mbedtls_ssl_conf_dbg(&o->conf, mbedtls_debug, NULL);
+    #endif
+
+    #if defined(MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED) || defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
+    // banana();
+    if (args->psk_identity.u_obj != mp_const_none && args->psk_key.u_obj != mp_const_none) {
+        size_t psk_identity_len;
+        size_t psk_key_len;
+        const byte *psk_identity = (const byte *)mp_obj_str_get_data(args->psk_identity.u_obj, &psk_identity_len);
+        const byte *psk_key = (const byte *)mp_obj_str_get_data(args->psk_key.u_obj, &psk_key_len);
+        // len should include terminating null
+        ret = mbedtls_ssl_conf_psk(&o->conf, (const unsigned char *) psk_key, psk_key_len, (const unsigned char *) psk_identity, psk_identity_len);
+        if (ret != 0) {
+            ret = MBEDTLS_ERR_PK_BAD_INPUT_DATA; // use general error for all key errors
+            goto cleanup;
+        }
+    }
     #endif
 
     ret = mbedtls_ssl_setup(&o->ssl, &o->conf);
@@ -466,6 +484,8 @@ STATIC mp_obj_t mod_ssl_wrap_socket(size_t n_args, const mp_obj_t *pos_args, mp_
         { MP_QSTR_cadata, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
         { MP_QSTR_do_handshake, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = true} },
         { MP_QSTR_dtls, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = false} },
+        { MP_QSTR_psk_identity, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_psk_key, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
     };
 
     // TODO: Check that sock implements stream protocol
