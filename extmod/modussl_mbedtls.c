@@ -435,7 +435,16 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(socket_setblocking_obj, socket_setblocking);
 
 STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, int *errcode) {
     mp_obj_ssl_socket_t *self = MP_OBJ_TO_PTR(o_in);
+
+    mp_obj_t sock = self->sock;
+    if (sock == NULL) {
+        // Closed socket:
+        return MP_STREAM_POLL_NVAL;
+    }
+
     if (request == MP_STREAM_CLOSE) {
+        self->sock = NULL;
+
         mbedtls_pk_free(&self->pkey);
         mbedtls_x509_crt_free(&self->cert);
         mbedtls_x509_crt_free(&self->cacert);
@@ -467,7 +476,7 @@ STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, i
         }
 
         // ...otherwise fall through to pass request to underlying socket
-        mp_uint_t ret = mp_get_stream(self->sock)->ioctl(self->sock, request, arg, errcode);
+        mp_uint_t ret = mp_get_stream(sock)->ioctl(sock, request, arg, errcode);
 
         if (has_pending) {
             ret |= MP_STREAM_POLL_RD;
@@ -481,7 +490,7 @@ STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, i
         return ret;
     }
     // Pass all other requests down to the underlying socket
-    return mp_get_stream(self->sock)->ioctl(self->sock, request, arg, errcode);
+    return mp_get_stream(sock)->ioctl(sock, request, arg, errcode);
 }
 
 STATIC const mp_rom_map_elem_t ussl_socket_locals_dict_table[] = {
