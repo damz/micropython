@@ -63,6 +63,7 @@ typedef struct _mp_obj_ssl_socket_t {
     mbedtls_pk_context pkey;
 
     uintptr_t poll_mask; // Indicates which read or write operations the protocol needs next
+    int last_error;
 
     #ifdef MBEDTLS_SSL_PROTO_DTLS
     mp_uint_t timer_start_ms;
@@ -268,6 +269,7 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     o->base.type = &ussl_socket_type;
     o->sock = sock;
     o->poll_mask = 0;
+    o->last_error = 0;
 
     int ret;
     mbedtls_ssl_init(&o->ssl);
@@ -434,6 +436,11 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
     o->poll_mask = 0;
 
+    if (o->last_error) {
+        *errcode = o->last_error;
+        return MP_STREAM_ERROR;
+    }
+
     int ret = mbedtls_ssl_read(&o->ssl, buf, size);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
         // end of stream
@@ -450,6 +457,8 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
         // renegotation.
         ret = MP_EWOULDBLOCK;
         o->poll_mask = MP_STREAM_POLL_WR;
+    } else {
+        o->last_error = ret;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -458,6 +467,11 @@ STATIC mp_uint_t socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *errc
 STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, int *errcode) {
     mp_obj_ssl_socket_t *o = MP_OBJ_TO_PTR(o_in);
     o->poll_mask = 0;
+
+    if (o->last_error) {
+        *errcode = o->last_error;
+        return MP_STREAM_ERROR;
+    }
 
     int ret = mbedtls_ssl_write(&o->ssl, buf, size);
     if (ret >= 0) {
@@ -471,6 +485,8 @@ STATIC mp_uint_t socket_write(mp_obj_t o_in, const void *buf, mp_uint_t size, in
         // renegotation.
         ret = MP_EWOULDBLOCK;
         o->poll_mask = MP_STREAM_POLL_RD;
+    } else {
+        o->last_error = ret;
     }
     *errcode = ret;
     return MP_STREAM_ERROR;
@@ -490,8 +506,8 @@ STATIC mp_uint_t socket_ioctl(mp_obj_t o_in, mp_uint_t request, uintptr_t arg, i
     mp_obj_ssl_socket_t *self = MP_OBJ_TO_PTR(o_in);
 
     mp_obj_t sock = self->sock;
-    if (sock == NULL) {
-        // Closed socket:
+    if (sock == NULL || self->last_error != 0) {
+        // Closed or error socket:
         return MP_STREAM_POLL_NVAL;
     }
 
