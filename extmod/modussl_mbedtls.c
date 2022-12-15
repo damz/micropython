@@ -204,6 +204,58 @@ STATIC int _mbedtls_timing_get_delay(void *ctx) {
 }
 #endif
 
+STATIC void set_ciphersuites(mbedtls_ssl_config *conf, int is_psk) {
+    static int initialized = 0;
+    static int *psk_ciphers;
+    static int *pki_ciphers;
+
+    if (!initialized) {
+        const int *ciphersuites = mbedtls_ssl_list_ciphersuites();
+
+        int count_psk = 0;
+        int count_pki = 0;
+        int i = 0;
+        const mbedtls_ssl_ciphersuite_t *ciphersuite;
+
+        for (i = 0; ciphersuites[i] != 0; i++) {
+            ciphersuite = mbedtls_ssl_ciphersuite_from_id(ciphersuites[i]);
+            if (mbedtls_ssl_ciphersuite_uses_psk(ciphersuite)) {
+                count_psk++;
+            } else {
+                count_pki++;
+            }
+        }
+
+        psk_ciphers = malloc(sizeof(int) * (count_psk+1));
+        pki_ciphers = malloc(sizeof(int) * (count_pki+1));
+        if (psk_ciphers == NULL || pki_ciphers == NULL) {
+            free(psk_ciphers);
+            free(pki_ciphers);
+            mp_raise_OSError(MP_ENOMEM);
+        }
+
+        int *psk_pos = psk_ciphers;
+        int *pki_pos = pki_ciphers;
+
+        for (i = 0; ciphersuites[i] != 0; i++) {
+            ciphersuite = mbedtls_ssl_ciphersuite_from_id(ciphersuites[i]);
+            if (mbedtls_ssl_ciphersuite_uses_psk(ciphersuite)) {
+                *psk_pos = ciphersuites[i];
+                psk_pos++;
+            } else {
+                *pki_pos = ciphersuites[i];
+                pki_pos++;
+            }
+        }
+
+        *psk_pos = 0;
+        *pki_pos = 0;
+        initialized = 1;
+    }
+
+    mbedtls_ssl_conf_ciphersuites(conf, is_psk ? psk_ciphers : pki_ciphers);
+}
+
 STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     // Verify the socket object has the full stream protocol
     mp_get_stream_raise(sock, MP_STREAM_OP_READ | MP_STREAM_OP_WRITE | MP_STREAM_OP_IOCTL);
@@ -251,8 +303,8 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
     #endif
 
     #if defined(MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED) || defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
-    // banana();
-    if (args->psk_identity.u_obj != mp_const_none && args->psk_key.u_obj != mp_const_none) {
+    int is_psk = args->psk_identity.u_obj != mp_const_none && args->psk_key.u_obj != mp_const_none;
+    if (is_psk) {
         size_t psk_identity_len;
         size_t psk_key_len;
         const byte *psk_identity = (const byte *)mp_obj_str_get_data(args->psk_identity.u_obj, &psk_identity_len);
@@ -264,6 +316,7 @@ STATIC mp_obj_ssl_socket_t *socket_new(mp_obj_t sock, struct ssl_args *args) {
             goto cleanup;
         }
     }
+    set_ciphersuites(&o->conf, is_psk);
     #endif
 
     ret = mbedtls_ssl_setup(&o->ssl, &o->conf);
